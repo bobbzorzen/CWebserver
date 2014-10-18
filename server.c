@@ -32,7 +32,7 @@ void freeArr(charArr* arr);
 void resetArr(charArr* arr);
 
 void error(const char *msg);
-void readline(char *message, char *line, int *counter);
+
 
 
 /**
@@ -317,18 +317,6 @@ void error(const char *msg) {
     exit(1);
 }
 
-/**
-    Reads all characters on the first line into line variable
-*/
-void readline(char *message, char *line, int *counter){
-    int index = 0;
-    while(message[*counter] != '\n'){
-        line[index] = message[*counter];
-        (*counter)++;
-        index ++;
-    }
-    line[index] = 0;
-}
 
 /**
     Initialize a new array
