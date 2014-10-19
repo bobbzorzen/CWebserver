@@ -54,48 +54,40 @@ int main(int argc, char *argv[])
     /**
         Declare variables
     */
-    //Server socket
-    int serverSock, clientSock, portNr, rval;
-
-    //Client address length
-    socklen_t clilen;
-    socklen_t addressLength;
-
-    //optval for setsockopt
-    int optval;
-
-    //Process id buffer for potential children
+    int serverSock, clientSock, portNr, rval, optval, i, isDaemon;
+    socklen_t clilen, addressLength;
     pid_t childPid;
-    
-    //Client address and server address
     struct sockaddr_in serverAddr, clientAddr;
 
     /**
         Init variables
     */
-    // Init tcp/ip stream socket for server
-    serverSock = socket(AF_INET, SOCK_STREAM, 0);
-    // Check if socket was created properly
-    if (serverSock < 0) {
-        error("ERROR opening socket");
+    portNr = 8888;
+    isDaemon = 0;
+    // Parse argv
+    for(i = 0; i < argc; i++) {
+        printf("Argument[%d]: %s\n",i , argv[i]);
+        // Set port if defined
+        if(!strcmp(argv[i], "-p")) {
+            portNr = strtol(argv[++i], (char **)NULL, 10);
+            printf("Use port: %d\n", portNr);
+        }
+        //Enable daemon mode if defined
+        if(!strcmp(argv[i], "-d")) {
+            isDaemon = 1;
+            printf("Enable Daemon mode\n", portNr);
+        }
     }
+    serverSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSock < 0) {error("ERROR opening socket");}
     // Clear the server address
     bzero((char *) &serverAddr, sizeof(serverAddr));
-    // Set the port
-    portNr = 8888;
-    // Set the socket family to tcp/ip
-    serverAddr.sin_family = AF_INET;
-    // Allow any connection addresses
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    // Sets the port number
-    serverAddr.sin_port = htons(portNr);
-    // Sets the clientLength
+    serverAddr.sin_family = AF_INET; // Set the socket family to tcp/ip
+    serverAddr.sin_addr.s_addr = INADDR_ANY; // Allow any connection addresses
+    serverAddr.sin_port = htons(portNr); // Sets the port number
     clilen = sizeof(clientAddr);
-    //Defaults nr of bytes read to 0
     rval = 0;
-    //set value of optval
     optval = 1;
-
     //Make sure that binds reuse server address so we don't get bind errors on restarts
     setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
     // Binds the socket to the server and checks that it worked
@@ -106,40 +98,26 @@ int main(int argc, char *argv[])
     /**
         Start Server thingies
     */
-
     // Listen to the socket
-    listen(serverSock,10);
+    listen(serverSock,20);
     printf("Server is now listening for clients\n\n");
     while(1) {
-        clientSock = -1;
-        // Accepts the client
+        /* accepts the client */
         clientSock = accept(serverSock, (struct sockaddr *) &clientAddr, &clilen);
+        if (clientSock < 0) {error("ERROR on accept");}
 
-        /* Get the remote address of the connection.  */
+        /* Get the remote address of the connection. */
         addressLength = sizeof (serverAddr);
         rval = getpeername (clientSock, (struct sockaddr *) &serverAddr, &addressLength);
-        /* Print a message.  */
         printf("connection accepted from %s\n", inet_ntoa (serverAddr.sin_addr));
 
-        // Checks if accept was successfull
-        if (clientSock < 0) {
-            error("ERROR on accept");
-        }
-        //Defaults the child pid to 0
-        childPid = 0;
         /* Fork a child process to handle the connection.  */
         childPid = fork();
         if (childPid == 0) {
-            /* This is the child process.  It shouldn't use stdin or stdout,
-            so close them.  */
-            //close(STDIN_FILENO);
-            //close(STDOUT_FILENO);
-            /* Also this child process shouldn't do anything with the
-            listening socket.  */
+            /* This child process shouldn't do anything with the listening socket. */
             close(serverSock);
 
-            /* Handle a request from the connection.  We have our own copy
-            of the connected socket descriptor.  */
+            /* Handle request with a clientSock copy */
             handleRequest(clientSock);
             /* All done; close the connection socket, and end the child
             process.  */
@@ -174,7 +152,7 @@ void handleRequest(int clientSock) {
     int i;
     //Char buffer for reading client sock
     char bc;
-    
+    char* ext;
     //Helping variables
     char method[64];
     char url[128];
@@ -199,17 +177,8 @@ void handleRequest(int clientSock) {
     initArr(&buffer, 128);
     initArr(&responseBuffer, 256);
 
-    /**
-        Add 200 ok response
-    */
-    //catArr(&responseBuffer, ok_response, strlen(ok_response));
-    rval = 0;
-
-    /*
-        Read the client request to buffer
-    */
-    while (strstr (buffer.array, "\r\n\r\n") == NULL && buffer.array[0] != '\n' )
-    {
+    /* Read the client request to buffer */
+    while (strstr (buffer.array, "\r\n\r\n") == NULL && buffer.array[0] != '\n' ) {
         read(clientSock, &bc, 1);
         addArr(&buffer, bc);
     }
@@ -218,9 +187,7 @@ void handleRequest(int clientSock) {
     sscanf (buffer.array, "%s %s %s", method, url, protocol);
 
     if(DEBUG) {
-        /**
-            Prints the buffer for "science!"
-        */
+        /* Prints the buffer for "science!" */
         printf("CLIENT REQUEST: \n");
         for(i = 0; i < buffer.used; i++) {
             printf("%c", buffer.array[i]);
@@ -236,21 +203,17 @@ void handleRequest(int clientSock) {
     if(strlen(url) == 0) {
         strcpy (url, "index.html");
     }
-
-    printf("    Trying to deliver: %s\n", url);
-    /**
-        Read file based on url
-    */
+    printf("    Client requested: %s\n", url);
+    
+    /* Try to deliver the requested file */
     fd = open(url, O_RDONLY);
     if(fd != -1) {
-        char* ext;
         ext = strrchr(url, '.');
         if (!ext) {
             //File has no extension... 400?
             printf("    Read error, file is a directory, FIXME\n");
             rval = sendBadRequest(clientSock);
-            close(clientSock);
-            exit(0);
+            return;
         } else {
             ext++;
         }
@@ -265,6 +228,7 @@ void handleRequest(int clientSock) {
             //Read error, file exists
             //send 500 internal server error.
             printf("Read error: File exists, server is broken\n");
+            rval = sendInternalError(clientSock);
         } else if(errno == 21) {
             //read error, file is a directory
             //enable fancy url parser that delivers index.html or 404?
@@ -275,8 +239,6 @@ void handleRequest(int clientSock) {
             printf("File %s not found\n", url);
         }
     }
-    printf("    Closing socket\n");
-    close(clientSock);
 }
 
 
