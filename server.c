@@ -4,14 +4,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <sys/types.h> 
+#include <sys/sendfile.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 /**
     CONSTANTS
 */
-enum {DEBUG=1};
+enum {DEBUG=0};
 
 /**
     Declares an array struct
@@ -35,6 +39,13 @@ void error(const char *msg);
 
 void handleRequest(int clientSock);
 
+int sendOkHeaders(int clientSock, char* ext);
+int sendNotFound(int clientSock);
+int sendBadRequest(int clientSock);
+int sendBadMethod(int clientSock);
+int sendInternalError(int clientSock);
+int sendForbidden(int clientSock);
+
 /**
     Main file
 */
@@ -44,13 +55,7 @@ int main(int argc, char *argv[])
         Declare variables
     */
     //Server socket
-    int serverSock;
-    //client socket
-    int clientSock;
-    //port number
-    int portNr;
-    //general purpose return value buffer
-    int rval;
+    int serverSock, clientSock, portNr, rval;
 
     //Client address length
     socklen_t clilen;
@@ -104,10 +109,8 @@ int main(int argc, char *argv[])
 
     // Listen to the socket
     listen(serverSock,10);
-    int cntr = 0;
+    printf("Server is now listening for clients\n\n");
     while(1) {
-        cntr++;
-        printf("COUNTER: %d\n", cntr);
         clientSock = -1;
         // Accepts the client
         clientSock = accept(serverSock, (struct sockaddr *) &clientAddr, &clilen);
@@ -129,11 +132,12 @@ int main(int argc, char *argv[])
         if (childPid == 0) {
             /* This is the child process.  It shouldn't use stdin or stdout,
             so close them.  */
-            close(STDIN_FILENO);
-            close(STDOUT_FILENO);
+            //close(STDIN_FILENO);
+            //close(STDOUT_FILENO);
             /* Also this child process shouldn't do anything with the
             listening socket.  */
             close(serverSock);
+
             /* Handle a request from the connection.  We have our own copy
             of the connected socket descriptor.  */
             handleRequest(clientSock);
@@ -168,8 +172,6 @@ void handleRequest(int clientSock) {
     int rval;
     // for counter
     int i;
-    //Char buffer to read file
-    int fc;
     //Char buffer for reading client sock
     char bc;
     
@@ -181,105 +183,26 @@ void handleRequest(int clientSock) {
     //String buffer for reading client request
     charArr buffer;
     //String buffer for reading file contents
-    charArr fileBuffer;
+    charArr filleExtention;
     //String buffer for response contents
     charArr responseBuffer;
 
     //Filepointer
-    FILE *fp;
-
-    /**
-        HTTP response, header for valid requests dokument body should be appended on GET requests
-    */
-    static char* ok_response =
-        "HTTP/1.0 200 OK\n"
-        "Content-type: text/html\n"
-        "\n";
-
-    /* 
-        HTTP response, header, and body indicating that the we didn't
-        understand the request.  
-    */
-    static char* bad_request_response = 
-        "HTTP/1.0 400 Bad Request\n"
-        "Content-type: text/html\n"
-        "\n"
-        "<html>\n"
-        " <body>\n"
-        "  <h1>400 Bad Request</h1>\n"
-        "  <p>This server did not understand your request.</p>\n"
-        " </body>\n"
-        "</html>\n";
-
-    /* 
-        HTTP response, header, and body template indicating that the
-        requested document was not found.  
-    */
-    static char* forbidden_response = 
-        "HTTP/1.0 403 Forbidden\n"
-        "Content-type: text/html\n"
-        "\n"
-        "<html>\n"
-        " <body>\n"
-        "  <h1>403 Forbidden</h1>\n"
-        "  <p>Permission denied.</p>\n"
-        " </body>\n"
-        "</html>\n";
-
-    /* 
-        HTTP response, header, and body template indicating that the
-        requested document was not found.  
-    */
-    static char* not_found_response = 
-        "HTTP/1.0 404 Not Found\n"
-        "Content-type: text/html\n"
-        "\n"
-        "<html>\n"
-        " <body>\n"
-        "  <h1>404 Not Found</h1>\n"
-        "  <p>The requested URL was not found on this server.</p>\n"
-        " </body>\n"
-        "</html>\n";
-
-    /* 
-        HTTP response, header, and body template indicating that the
-        method was not understood.  
-    */
-    static char* internal_server_error_response = 
-        "HTTP/1.0 500 Internal server error\n"
-        "Content-type: text/html\n"
-        "\n"
-        "<html>\n"
-        " <body>\n"
-        "  <h1>500 Internal Server Error</h1>\n"
-        "  <p>Something went wrong.</p>\n"
-        " </body>\n"
-        "</html>\n";
-
-    /* 
-        HTTP response, header, and body template indicating that the
-        method was not understood.  
-    */
-    static char* bad_method_response = 
-        "HTTP/1.0 501 Method Not Implemented\n"
-        "Content-type: text/html\n"
-        "\n"
-        "<html>\n"
-        " <body>\n"
-        "  <h1>501 Method Not Implemented</h1>\n"
-        "  <p>The method %s is not implemented by this server.</p>\n"
-        " </body>\n"
-        "</html>\n";
+    int fd;
+    struct stat file_stat;
+    off_t offset = 0;
+    //Char buffer to read file
+    int fileSize;
 
     //Init buffer arrays
-    initArr(&fileBuffer, 128);
+    initArr(&filleExtention, 5);
     initArr(&buffer, 128);
     initArr(&responseBuffer, 256);
 
     /**
         Add 200 ok response
     */
-    catArr(&responseBuffer, ok_response, strlen(ok_response));
+    //catArr(&responseBuffer, ok_response, strlen(ok_response));
     rval = 0;
 
     /*
@@ -314,40 +237,187 @@ void handleRequest(int clientSock) {
         strcpy (url, "index.html");
     }
 
+    printf("    Trying to deliver: %s\n", url);
     /**
         Read file based on url
     */
-    printf("READING FILE: %s\n",url);
-    fp = fopen(url, "r");
-    if(fp != NULL) {
-        while ((fc = fgetc(fp)) != EOF)
-        {
-            fc = (char) fc;
-            addArr(&fileBuffer, fc);
+    fd = open(url, O_RDONLY);
+    if(fd != -1) {
+        char* ext;
+        ext = strrchr(url, '.');
+        if (!ext) {
+            //File has no extension... 400?
+            printf("    Read error, file is a directory, FIXME\n");
+            rval = sendBadRequest(clientSock);
+            close(clientSock);
+            exit(0);
+        } else {
+            ext++;
         }
-        addArr(&fileBuffer, '\0');
-        if(DEBUG) {
-            /**
-                Prints the fileBuffer for "science!"
-            */
-            printf("FILE CONENTES: \n");
-            for(i = 0; i < fileBuffer.used; i++) {
-                printf("%c", fileBuffer.array[i]);
-            }
+        /* Get file stats */
+        fstat(fd, &file_stat);
+        fileSize = file_stat.st_size;
+        rval = sendOkHeaders(clientSock, ext);
+        rval = sendfile (clientSock, fd, NULL, fileSize);
+        printf("    Delivered file: %s\n", url);
+    } else {
+        if(errno == 17) {
+            //Read error, file exists
+            //send 500 internal server error.
+            printf("Read error: File exists, server is broken\n");
+        } else if(errno == 21) {
+            //read error, file is a directory
+            //enable fancy url parser that delivers index.html or 404?
+            printf("Read error, file is a directory, FIXME\n");
+            rval = sendBadRequest(clientSock);
+        } else {
+            rval = sendNotFound(clientSock);
+            printf("File %s not found\n", url);
         }
     }
-    else{
-        // do 404
-        resetArr(&responseBuffer);
-        catArr(&responseBuffer, not_found_response, strlen(not_found_response));
-    }
-
-    catArr(&responseBuffer, fileBuffer.array, fileBuffer.used);
-    // Writes to the client and stores resultcode in rval
-    rval = write(clientSock, responseBuffer.array, responseBuffer.used);
-    // Closes client socket
+    printf("    Closing socket\n");
     close(clientSock);
 }
+
+
+int sendOkHeaders(int clientSock, char* ext) {
+    /**
+        HTTP response, header for valid requests dokument body should be appended on GET requests
+    */
+    charArr response;
+    initArr(&response, 50);
+    char* jpgExt = "jpg";
+    char* pngExt = "png";
+    char* gifExt = "gif";
+    char* cssExt = "css";
+    char* jsExt = "js";
+    static char* ok_html_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: text/html\n"
+        "\n";
+    static char* ok_jpg_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: image/jpeg\n"
+        "\n";
+    static char* ok_png_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: image/png\n"
+        "\n";
+    static char* ok_gif_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: image/gif\n"
+        "\n";
+    static char* ok_css_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: text/css\n"
+        "\n";
+    static char* ok_js_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: text/javascript\n"
+        "\n";
+    if(!strcmp(jpgExt, ext)) {
+        catArr(&response, ok_jpg_response, strlen(ok_jpg_response));
+    }else if(!strcmp(pngExt, ext)){
+        catArr(&response, ok_png_response, strlen(ok_png_response));
+    }else if(!strcmp(gifExt, ext)){
+        catArr(&response, ok_gif_response, strlen(ok_gif_response));
+    }else if(!strcmp(cssExt, ext)){
+        catArr(&response, ok_css_response, strlen(ok_css_response));
+    }else if(!strcmp(jsExt, ext)){
+        catArr(&response, ok_js_response, strlen(ok_js_response));
+    }else{
+        catArr(&response, ok_html_response, strlen(ok_html_response));
+    }
+    int rval = write(clientSock, response.array, response.used);
+    freeArr(&response);
+    return rval;
+}
+int sendNotFound(int clientSock) {
+    /* 
+        HTTP response, header, and body template indicating that the
+        requested document was not found.  
+    */
+    static char* not_found_response = 
+        "HTTP/1.0 404 Not Found\n"
+        "Content-type: text/html\n"
+        "\n"
+        "<html>\n"
+        " <body>\n"
+        "  <h1>404 Not Found</h1>\n"
+        "  <p>The requested URL was not found on this server.</p>\n"
+        " </body>\n"
+        "</html>\n";
+    return write(clientSock, not_found_response, strlen(not_found_response));
+}
+int sendBadRequest(int clientSock) {
+    /* 
+        HTTP response, header, and body indicating that the we didn't
+        understand the request.  
+    */
+    static char* bad_request_response = 
+        "HTTP/1.0 400 Bad Request\n"
+        "Content-type: text/html\n"
+        "\n"
+        "<html>\n"
+        " <body>\n"
+        "  <h1>400 Bad Request</h1>\n"
+        "  <p>This server did not understand your request.</p>\n"
+        " </body>\n"
+        "</html>\n";
+    return write(clientSock, bad_request_response, strlen(bad_request_response));
+}
+int sendBadMethod(int clientSock) {
+    /* 
+        HTTP response, header, and body template indicating that the
+        method was not understood.  
+    */
+    static char* bad_method_response = 
+        "HTTP/1.0 501 Method Not Implemented\n"
+        "Content-type: text/html\n"
+        "\n"
+        "<html>\n"
+        " <body>\n"
+        "  <h1>501 Method Not Implemented</h1>\n"
+        "  <p>The method %s is not implemented by this server.</p>\n"
+        " </body>\n"
+        "</html>\n";
+    return write(clientSock, bad_method_response, strlen(bad_method_response));
+}
+int sendInternalError(int clientSock) {
+    /* 
+        HTTP response, header, and body template indicating that the
+        method was not understood.  
+    */
+    static char* internal_server_error_response = 
+        "HTTP/1.0 500 Internal server error\n"
+        "Content-type: text/html\n"
+        "\n"
+        "<html>\n"
+        " <body>\n"
+        "  <h1>500 Internal Server Error</h1>\n"
+        "  <p>Something went wrong.</p>\n"
+        " </body>\n"
+        "</html>\n";
+    return write(clientSock, internal_server_error_response, strlen(internal_server_error_response));
+}
+int sendForbidden(int clientSock) {
+    /* 
+        HTTP response, header, and body template indicating that the
+        requested document was not found.  
+    */
+    static char* forbidden_response = 
+        "HTTP/1.0 403 Forbidden\n"
+        "Content-type: text/html\n"
+        "\n"
+        "<html>\n"
+        " <body>\n"
+        "  <h1>403 Forbidden</h1>\n"
+        "  <p>Permission denied.</p>\n"
+        " </body>\n"
+        "</html>\n";
+    return write(clientSock, forbidden_response, strlen(forbidden_response));
+}
+
 
 /**
     logs an error and exits the program with error code 1
