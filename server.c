@@ -38,7 +38,7 @@ void resetArr(charArr* arr);
 void error(const char *msg);
 
 void handleRequest(int clientSock);
-void handleResponse(int clientSock, char* url, char* method);
+void handleResponse(int clientSock, charArr url, char* method);
 
 int sendOkHeaders(int clientSock, char* ext);
 int sendNotFound(int clientSock);
@@ -151,13 +151,14 @@ void handleRequest(int clientSock) {
     char bc;
     //Helping variables
     char method[64];
-    char url[128];
+    char raw_url[128];
     char protocol[64];
     //String buffers
-    charArr buffer;
+    charArr buffer, url;
 
     //Init buffer array
     initArr(&buffer, 128);
+    initArr(&url, 128);
 
 
     /* Read the client request to buffer */
@@ -166,36 +167,37 @@ void handleRequest(int clientSock) {
         addArr(&buffer, bc);
     }
     //extracts the method, url and protocoll from the buffer
-    sscanf (buffer.array, "%s %s %s", method, url, protocol);
+    sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
+    catArr(&url, raw_url+1, strlen(raw_url)-1);
+    freeArr(&buffer);
     handleResponse(clientSock, url, method);
-
+    freeArr(&url);
 }
-
-void handleResponse(int clientSock, char* url, char* method) {
-    int rval, i, fd, fileSize;
+void handleResponse(int clientSock, charArr url, char* method) {
+    int rval, fd, fileSize;
     char* ext;
-    charArr filleExtention, responseBuffer;
     struct stat file_stat;
 
-    initArr(&filleExtention, 5);
-    initArr(&responseBuffer, 256);
     //Removes first slash of requested url
-    memmove(url, url+1, strlen(url));
+    //memmove(url, url+1, strlen(url));
     //If url is now empty change url to index.html
-    if(strlen(url) == 0) {
-        strcpy (url, "index.html");
+    if(url.used == 0 || !strcmp(&url.array[url.used-1], "/")) {
+        catArr(&url, "index.html", strlen("index.html"));
     }
     printf("    Client requested: %s\n", url);
     
     /* Try to deliver the requested file */
-    fd = open(url, O_RDONLY);
+    fd = open(url.array, O_RDONLY);
     if(fd != -1) {
-        ext = strrchr(url, '.');
+        ext = strrchr(url.array, '.');
         if (!ext) {
-            //File has no extension... 400?
-            printf("    Read error, file is a directory, FIXME\n");
-            rval = sendBadRequest(clientSock);
+            addArr(&url, '/');
+            handleResponse(clientSock, url, method);
             return;
+            //File has no extension... 400?
+            //printf("    Read error, file is a directory, FIXME\n");
+            //rval = sendBadRequest(clientSock);
+            //return;
         } else {
             ext++;
         }
@@ -206,7 +208,7 @@ void handleResponse(int clientSock, char* url, char* method) {
         if(!strcmp(method, "GET")) {
             rval = sendOkHeaders(clientSock, ext);
             rval = sendfile (clientSock, fd, NULL, fileSize);
-            printf("    Delivered file: %s\n", url);
+            printf("    Delivered file: %s\n", url.array);
         } else if (!strcmp(method, "HEAD")){
             rval = sendOkHeaders(clientSock, ext);
         } else {
@@ -226,10 +228,12 @@ void handleResponse(int clientSock, char* url, char* method) {
             rval = sendBadRequest(clientSock);
         } else {
             rval = sendNotFound(clientSock);
-            printf("File %s not found\n", url);
+            printf("File %s not found\n", url.array);
         }
     }
 }
+
+
 
 int sendOkHeaders(int clientSock, char* ext) {
     /**
