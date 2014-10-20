@@ -37,8 +37,8 @@ void resetArr(charArr* arr);
 
 void error(const char *msg);
 
-void handleRequest(int clientSock);
-void handleResponse(int clientSock, charArr url, char* method);
+void handleRequest(int clientSock, charArr* url);
+void handleResponse(int clientSock, charArr* url, char* method);
 
 int sendOkHeaders(int clientSock, char* ext);
 int sendNotFound(int clientSock);
@@ -47,11 +47,13 @@ int sendBadMethod(int clientSock);
 int sendInternalError(int clientSock);
 int sendForbidden(int clientSock);
 
+int loadDefaultVariables(char* configFile, charArr* defaultPath);
 /**
     Main file
 */
 int main(int argc, char *argv[])
 {
+
     /**
         Declare variables
     */
@@ -59,15 +61,16 @@ int main(int argc, char *argv[])
     socklen_t clilen, addressLength;
     pid_t childPid;
     struct sockaddr_in serverAddr, clientAddr;
-
+    char* configFile = ".lab3-config";
+    charArr defaultPath;
+    initArr(&defaultPath, 25);
+    portNr = loadDefaultVariables(configFile, &defaultPath);
     /**
         Init variables
     */
-    portNr = 8888;
     isDaemon = 0;
     // Parse argv
     for(i = 0; i < argc; i++) {
-        printf("Argument[%d]: %s\n",i , argv[i]);
         // Set port if defined
         if(!strcmp(argv[i], "-p")) {
             portNr = strtol(argv[++i], (char **)NULL, 10);
@@ -79,6 +82,7 @@ int main(int argc, char *argv[])
             printf("Enable Daemon mode\n", portNr);
         }
     }
+    printf("PORT: %d\n", portNr);
     serverSock = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSock < 0) {error("ERROR opening socket");}
     // Clear the server address
@@ -119,7 +123,7 @@ int main(int argc, char *argv[])
             close(serverSock);
 
             /* Handle request with a clientSock copy */
-            handleRequest(clientSock);
+            handleRequest(clientSock, &defaultPath);
             /* All done; close the connection socket, and end the child
             process.  */
             close(clientSock);
@@ -143,7 +147,7 @@ int main(int argc, char *argv[])
 /**
     Handle the request and respond to the client
 */
-void handleRequest(int clientSock) {
+void handleRequest(int clientSock, charArr* url) {
     /**
         Define variables
     */
@@ -154,12 +158,10 @@ void handleRequest(int clientSock) {
     char raw_url[128];
     char protocol[64];
     //String buffers
-    charArr buffer, url;
+    charArr buffer;
 
     //Init buffer array
     initArr(&buffer, 128);
-    initArr(&url, 128);
-
 
     /* Read the client request to buffer */
     while (strstr (buffer.array, "\r\n\r\n") == NULL && buffer.array[0] != '\n' ) {
@@ -168,30 +170,30 @@ void handleRequest(int clientSock) {
     }
     //extracts the method, url and protocoll from the buffer
     sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
-    catArr(&url, raw_url+1, strlen(raw_url)-1);
+    catArr(url, raw_url+1, strlen(raw_url)-1);
     freeArr(&buffer);
     handleResponse(clientSock, url, method);
-    freeArr(&url);
+    freeArr(url);
 }
-void handleResponse(int clientSock, charArr url, char* method) {
+void handleResponse(int clientSock, charArr* url, char* method) {
     int rval, fd, fileSize;
     char* ext;
     struct stat file_stat;
-
     //Removes first slash of requested url
     //memmove(url, url+1, strlen(url));
     //If url is now empty change url to index.html
-    if(url.used == 0 || !strcmp(&url.array[url.used-1], "/")) {
-        catArr(&url, "index.html", strlen("index.html"));
+    if(!strcmp(&url->array[url->used-1], "/")) {
+        catArr(url, "index.html", strlen("index.html"));
+        url->array[url->used] = '\0'; //FIXME
     }
-    printf("    Client requested: %s\n", url);
+    printf("    Client requested: %s\n", url->array);
     
     /* Try to deliver the requested file */
-    fd = open(url.array, O_RDONLY);
+    fd = open(url->array, O_RDONLY);
     if(fd != -1) {
-        ext = strrchr(url.array, '.');
+        ext = strrchr(url->array, '.');
         if (!ext) {
-            addArr(&url, '/');
+            addArr(url, '/');
             handleResponse(clientSock, url, method);
             return;
             //File has no extension... 400?
@@ -204,11 +206,11 @@ void handleResponse(int clientSock, charArr url, char* method) {
         /* Get file stats */
         fstat(fd, &file_stat);
         fileSize = file_stat.st_size;
-        printf("    Method: %s\n", method);
+        if(DEBUG) {printf("    Method: %s\n", method);}
         if(!strcmp(method, "GET")) {
             rval = sendOkHeaders(clientSock, ext);
             rval = sendfile (clientSock, fd, NULL, fileSize);
-            printf("    Delivered file: %s\n", url.array);
+            printf("    Delivered file: %s\n", url->array);
         } else if (!strcmp(method, "HEAD")){
             rval = sendOkHeaders(clientSock, ext);
         } else {
@@ -228,7 +230,7 @@ void handleResponse(int clientSock, charArr url, char* method) {
             rval = sendBadRequest(clientSock);
         } else {
             rval = sendNotFound(clientSock);
-            printf("File %s not found\n", url.array);
+            printf("File %s not found\n", url->array);
         }
     }
 }
@@ -426,4 +428,45 @@ void resetArr(charArr* arr) {
     size_t originalSize = arr->size;
     freeArr(arr);
     initArr(arr, originalSize);
+}
+
+int loadDefaultVariables(char* configFile, charArr* defaultPath) {
+    charArr fileBuffer;
+    int fd, portBuffer;
+    char bc;
+    char* rval;
+    char* baseUrl = "/home/pi/shellScripting/Lab2/C/CWebserver/www/";
+    int basePort = 8888;
+    initArr(&fileBuffer, 10);
+    /* Read the defaultPath */
+    fd = open(configFile, O_RDONLY);
+    while (fileBuffer.array[fileBuffer.used-1] != '\n' ) {
+        read(fd, &bc, 1);
+        addArr(&fileBuffer, bc);
+    }
+    rval = strrchr(fileBuffer.array, ':');
+    if(!rval) {
+        printf("No default url found\n");
+        //No default path found... use default default...
+        rval = baseUrl;
+    } else {
+        rval++;
+    }
+    catArr(defaultPath, rval, strlen(rval)-1);
+    resetArr(&fileBuffer);
+    /* Read the defaultPort */
+    while (fileBuffer.array[fileBuffer.used-1] != '\n' ) {
+        read(fd, &bc, 1);
+        addArr(&fileBuffer, bc);
+    }
+    rval = strrchr(fileBuffer.array, ':');
+    if(!rval) {
+        printf("no default port found\n");
+        //No default path found... use default default...
+        portBuffer = basePort;
+    } else {
+        rval++;
+        portBuffer = strtol(rval, (char **)NULL, 10);
+    }
+    return portBuffer;
 }
