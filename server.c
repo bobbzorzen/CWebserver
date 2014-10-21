@@ -24,21 +24,31 @@ typedef struct {
     char* array;
     size_t used;
     size_t size;
-}charArr;
+}CharArr;
+/**
+    Declares a client info struct
+*/
+typedef struct {
+    int socket;
+    CharArr method;
+    CharArr url;
+    CharArr protocol;
+    CharArr address;
+}ClientInfo;
 
 /**
     Declares the function headers
 */
-void initArr(charArr* arr, size_t startSize);
-void addArr(charArr* arr, char item);
-void catArr(charArr* arr, char* items, int arrLen);
-void freeArr(charArr* arr);
-void resetArr(charArr* arr);
+void initArr(CharArr* arr, size_t startSize);
+void addArr(CharArr* arr, char item);
+void catArr(CharArr* arr, char* items, int arrLen);
+void freeArr(CharArr* arr);
+void resetArr(CharArr* arr);
 
 void error(const char *msg);
 
-void handleRequest(int clientSock, charArr* url);
-void handleResponse(int clientSock, charArr* url, char* method);
+void handleRequest(ClientInfo* client, CharArr* url);
+void handleResponse(ClientInfo* client, CharArr* url, char* method);
 
 int sendOkHeaders(int clientSock, char* ext);
 int sendNotFound(int clientSock);
@@ -47,7 +57,8 @@ int sendBadMethod(int clientSock);
 int sendInternalError(int clientSock);
 int sendForbidden(int clientSock);
 
-int loadDefaultVariables(char* configFile, charArr* defaultPath);
+int loadDefaultVariables(char* configFile, CharArr* defaultPath);
+int getHeaderInfo(ClientInfo* client, CharArr* buffer);
 /**
     Main file
 */
@@ -62,8 +73,14 @@ int main(int argc, char *argv[])
     pid_t childPid;
     struct sockaddr_in serverAddr, clientAddr;
     char* configFile = ".lab3-config";
-    charArr defaultPath;
-    initArr(&defaultPath, 25);
+    CharArr defaultPath;
+    ClientInfo client;
+    client.socket = 0;
+    initArr(&client.method, 16);
+    initArr(&client.url, 32);
+    initArr(&client.protocol, 16);
+    initArr(&client.address, 32);
+    initArr(&defaultPath, 32);
     portNr = loadDefaultVariables(configFile, &defaultPath);
     /**
         Init variables
@@ -80,6 +97,11 @@ int main(int argc, char *argv[])
         if(!strcmp(argv[i], "-d")) {
             isDaemon = 1;
             printf("Enable Daemon mode\n", portNr);
+        }
+        //Enable log file if defined
+        if(!strcmp(argv[i], "-l")) {
+            //logFile = argv[++i];
+            //printf("Sets logFile\n", portNr);
         }
     }
     printf("PORT: %d\n", portNr);
@@ -108,12 +130,12 @@ int main(int argc, char *argv[])
     printf("Server is now listening for clients\n\n");
     while(1) {
         /* accepts the client */
-        clientSock = accept(serverSock, (struct sockaddr *) &clientAddr, &clilen);
-        if (clientSock < 0) {error("ERROR on accept");}
+        client.socket = accept(serverSock, (struct sockaddr *) &clientAddr, &clilen);
+        if (client.socket < 0) {error("ERROR on accept");}
 
         /* Get the remote address of the connection. */
         addressLength = sizeof (serverAddr);
-        rval = getpeername (clientSock, (struct sockaddr *) &serverAddr, &addressLength);
+        rval = getpeername (client.socket, (struct sockaddr *) &serverAddr, &addressLength);
         printf("connection accepted from %s\n", inet_ntoa (serverAddr.sin_addr));
 
         /* Fork a child process to handle the connection.  */
@@ -122,11 +144,11 @@ int main(int argc, char *argv[])
             /* This child process shouldn't do anything with the listening socket. */
             close(serverSock);
 
-            /* Handle request with a clientSock copy */
-            handleRequest(clientSock, &defaultPath);
+            /* Handle request with a client.socket copy */
+            handleRequest(&client, &defaultPath);
             /* All done; close the connection socket, and end the child
             process.  */
-            close(clientSock);
+            close(client.socket);
             exit(0);
         }
         else if (childPid > 0) {
@@ -134,7 +156,7 @@ int main(int argc, char *argv[])
             connection, so we don't need our copy of the connected socket
             descriptor.  Close it.  Then continue with the loop and
             accept another connection.  */
-            close (clientSock);
+            close (client.socket);
         }
         else {
             /* Call to fork failed.  */
@@ -147,7 +169,7 @@ int main(int argc, char *argv[])
 /**
     Handle the request and respond to the client
 */
-void handleRequest(int clientSock, charArr* url) {
+void handleRequest(ClientInfo* client, CharArr* url) {
     /**
         Define variables
     */
@@ -158,24 +180,31 @@ void handleRequest(int clientSock, charArr* url) {
     char raw_url[128];
     char protocol[64];
     //String buffers
-    charArr buffer;
+    CharArr buffer;
 
     //Init buffer array
     initArr(&buffer, 128);
 
     /* Read the client request to buffer */
     while (strstr (buffer.array, "\r\n\r\n") == NULL && buffer.array[0] != '\n' ) {
-        read(clientSock, &bc, 1);
+        read(client->socket, &bc, 1);
         addArr(&buffer, bc);
     }
     //extracts the method, url and protocoll from the buffer
-    sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
-    catArr(url, raw_url+1, strlen(raw_url)-1);
+    if(getHeaderInfo(client, &buffer)) {
+        //sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
+        catArr(url, client->url.array+1, client->url.used-1);
+        handleResponse(client, url, client->method.array);
+    }
+
+    freeArr(&client->method);
+    freeArr(&client->url);
+    freeArr(&client->protocol);
+    freeArr(&client->address);
     freeArr(&buffer);
-    handleResponse(clientSock, url, method);
     freeArr(url);
 }
-void handleResponse(int clientSock, charArr* url, char* method) {
+void handleResponse(ClientInfo* client, CharArr* url, char* method) {
     int rval, fd, fileSize;
     char* ext;
     struct stat file_stat;
@@ -194,12 +223,9 @@ void handleResponse(int clientSock, charArr* url, char* method) {
         ext = strrchr(url->array, '.');
         if (!ext) {
             addArr(url, '/');
-            handleResponse(clientSock, url, method);
+            handleResponse(client, url, method);
             return;
             //File has no extension... 400?
-            //printf("    Read error, file is a directory, FIXME\n");
-            //rval = sendBadRequest(clientSock);
-            //return;
         } else {
             ext++;
         }
@@ -208,44 +234,78 @@ void handleResponse(int clientSock, charArr* url, char* method) {
         fileSize = file_stat.st_size;
         if(DEBUG) {printf("    Method: %s\n", method);}
         if(!strcmp(method, "GET")) {
-            rval = sendOkHeaders(clientSock, ext);
-            rval = sendfile (clientSock, fd, NULL, fileSize);
+            rval = sendOkHeaders(client->socket, ext);
+            rval = sendfile (client->socket, fd, NULL, fileSize);
             printf("    Delivered file: %s\n", url->array);
         } else if (!strcmp(method, "HEAD")){
-            rval = sendOkHeaders(clientSock, ext);
+            rval = sendOkHeaders(client->socket, ext);
         } else {
             printf("Unsupported method: %s\n", method);
-            sendBadRequest(clientSock);
+            sendBadRequest(client->socket);
         }
     } else {
         if(errno == 17) {
             //Read error, file exists
             //send 500 internal server error.
             printf("Read error: File exists, server is broken\n");
-            rval = sendInternalError(clientSock);
+            rval = sendInternalError(client->socket);
         } else if(errno == 21) {
             //read error, file is a directory
             //enable fancy url parser that delivers index.html or 404?
             printf("Read error, file is a directory, FIXME\n");
-            rval = sendBadRequest(clientSock);
+            rval = sendBadRequest(client->socket);
         } else {
-            rval = sendNotFound(clientSock);
+            rval = sendNotFound(client->socket);
             printf("File %s not found\n", url->array);
         }
     }
 }
 
+int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
+    char bc;
+    int counter = 0;
 
+    //parse http method (GET, HEAD, etc)
+    bc = buffer->array[counter++];
+    while(bc != ' ' && counter < buffer->used) {
+        addArr(&client->method, bc);
+        bc = buffer->array[counter++];
+    }
+
+    //Parse requested url
+    bc = buffer->array[counter];
+    while(bc != ' ' && client->url.used != 2000 && counter < buffer->used) {
+        addArr(&client->url, bc);
+        bc = buffer->array[counter++];
+    }
+    if(client->url.used == 2000 && counter < buffer->used) {
+        while(bc != ' ') {
+            bc = buffer->array[counter++];
+        }
+    }
+    bc = buffer->array[counter];
+    while(bc != '\n' && counter < buffer->used) {
+        addArr(&client->protocol, bc);
+        bc = buffer->array[counter++];
+    }
+    if(client->url.used == 2000 || counter >= buffer->used) {
+        sendBadRequest(client->socket);
+        return 0;
+        //log
+    }
+    return 1;
+}
 
 int sendOkHeaders(int clientSock, char* ext) {
     /**
         HTTP response, header for valid requests dokument body should be appended on GET requests
     */
-    charArr response;
+    CharArr response;
     initArr(&response, 50);
     char* jpgExt = "jpg";
     char* pngExt = "png";
     char* gifExt = "gif";
+    char* icoExt = "ico";
     char* cssExt = "css";
     char* jsExt = "js";
     static char* ok_html_response =
@@ -264,6 +324,10 @@ int sendOkHeaders(int clientSock, char* ext) {
         "HTTP/1.0 200 OK\n"
         "Content-type: image/gif\n"
         "\n";
+    static char* ok_ico_response =
+        "HTTP/1.0 200 OK\n"
+        "Content-type: image/x-icon\n"
+        "\n";
     static char* ok_css_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: text/css\n"
@@ -278,6 +342,8 @@ int sendOkHeaders(int clientSock, char* ext) {
         catArr(&response, ok_png_response, strlen(ok_png_response));
     }else if(!strcmp(gifExt, ext)){
         catArr(&response, ok_gif_response, strlen(ok_gif_response));
+    }else if(!strcmp(icoExt, ext)){
+        catArr(&response, ok_ico_response, strlen(ok_ico_response));
     }else if(!strcmp(cssExt, ext)){
         catArr(&response, ok_css_response, strlen(ok_css_response));
     }else if(!strcmp(jsExt, ext)){
@@ -388,7 +454,7 @@ void error(const char *msg) {
 /**
     Initialize a new array
 */
-void initArr(charArr* arr, size_t startSize) {
+void initArr(CharArr* arr, size_t startSize) {
     arr->array = (char *)malloc(startSize * sizeof(char));
     arr->used = 0;
     arr->size = startSize;
@@ -397,7 +463,7 @@ void initArr(charArr* arr, size_t startSize) {
 /**
     Add item to array
 */
-void addArr(charArr* arr, char item) {
+void addArr(CharArr* arr, char item) {
     if (arr->used == arr->size) {
         arr->size *= 2;
         arr->array = (char *)realloc(arr->array, arr->size * sizeof(char));
@@ -405,7 +471,7 @@ void addArr(charArr* arr, char item) {
     arr->array[arr->used++] = item;
 }
 
-void catArr(charArr* arr, char* items, int arrLen) {
+void catArr(CharArr* arr, char* items, int arrLen) {
     int i;
     for(i = 0; i < arrLen; i++) {
         addArr(arr, items[i]);
@@ -415,7 +481,7 @@ void catArr(charArr* arr, char* items, int arrLen) {
 /**
     Free allocated memory of arr
 */
-void freeArr(charArr* arr) {
+void freeArr(CharArr* arr) {
     int i;
     for(i = 0; i < arr->used; i++) {
         arr->array[i] = 0;
@@ -424,14 +490,14 @@ void freeArr(charArr* arr) {
     arr->array = NULL;
     arr->used = arr->size = 0;
 }
-void resetArr(charArr* arr) {
+void resetArr(CharArr* arr) {
     size_t originalSize = arr->size;
     freeArr(arr);
     initArr(arr, originalSize);
 }
 
-int loadDefaultVariables(char* configFile, charArr* defaultPath) {
-    charArr fileBuffer;
+int loadDefaultVariables(char* configFile, CharArr* defaultPath) {
+    CharArr fileBuffer;
     int fd, portBuffer;
     char bc;
     char* rval;
