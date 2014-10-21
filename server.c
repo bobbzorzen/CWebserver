@@ -1,16 +1,20 @@
 /* A simple server in the internet domain using TCP
    The port number is passed as an argument */
+#include <arpa/inet.h>
+#include <time.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
+#include <strings.h>
+#include <syslog.h>
 #include <sys/types.h> 
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
+#include <unistd.h>
 
 /**
     CONSTANTS
@@ -30,10 +34,13 @@ typedef struct {
 */
 typedef struct {
     int socket;
+    int bytesWritten;
     CharArr method;
     CharArr url;
     CharArr protocol;
     CharArr address;
+    CharArr statusCode;
+    CharArr logFile;
 }ClientInfo;
 
 /**
@@ -59,6 +66,8 @@ int sendForbidden(int clientSock);
 
 int loadDefaultVariables(char* configFile, CharArr* defaultPath);
 int getHeaderInfo(ClientInfo* client, CharArr* buffer);
+
+void getFormatedTime(char* buffer);
 /**
     Main file
 */
@@ -76,10 +85,13 @@ int main(int argc, char *argv[])
     CharArr defaultPath;
     ClientInfo client;
     client.socket = 0;
+    client.bytesWritten = 0;
     initArr(&client.method, 16);
     initArr(&client.url, 32);
     initArr(&client.protocol, 16);
     initArr(&client.address, 32);
+    initArr(&client.statusCode, 4);
+    initArr(&client.logFile, 64);
     initArr(&defaultPath, 32);
     portNr = loadDefaultVariables(configFile, &defaultPath);
     /**
@@ -100,8 +112,8 @@ int main(int argc, char *argv[])
         }
         //Enable log file if defined
         if(!strcmp(argv[i], "-l")) {
-            //logFile = argv[++i];
-            //printf("Sets logFile\n", portNr);
+            catArr(&client.logFile, argv[++i], strlen(argv[i]));
+            printf("Sets logFile to: %s\n", client.logFile.array);
         }
     }
     printf("PORT: %d\n", portNr);
@@ -134,10 +146,11 @@ int main(int argc, char *argv[])
         if (client.socket < 0) {error("ERROR on accept");}
 
         /* Get the remote address of the connection. */
-        addressLength = sizeof (serverAddr);
-        rval = getpeername (client.socket, (struct sockaddr *) &serverAddr, &addressLength);
-        printf("connection accepted from %s\n", inet_ntoa (serverAddr.sin_addr));
-
+        addressLength = sizeof(serverAddr);
+        rval = getpeername(client.socket, (struct sockaddr *)&serverAddr, &addressLength);
+        printf("connection accepted from %s\n", inet_ntoa(serverAddr.sin_addr));
+        resetArr(&client.address);
+        catArr(&client.address, inet_ntoa(serverAddr.sin_addr), strlen(inet_ntoa(serverAddr.sin_addr)));
         /* Fork a child process to handle the connection.  */
         childPid = fork();
         if (childPid == 0) {
@@ -173,12 +186,11 @@ void handleRequest(ClientInfo* client, CharArr* url) {
     /**
         Define variables
     */
+    FILE *fd;
     //Char buffer for reading client sock
     char bc;
     //Helping variables
-    char method[64];
-    char raw_url[128];
-    char protocol[64];
+    char timeBuffer[64];
     //String buffers
     CharArr buffer;
 
@@ -190,17 +202,29 @@ void handleRequest(ClientInfo* client, CharArr* url) {
         read(client->socket, &bc, 1);
         addArr(&buffer, bc);
     }
+    if(DEBUG) {printf("CLIENT REQUEST: %s\n", buffer.array);}
     //extracts the method, url and protocoll from the buffer
     if(getHeaderInfo(client, &buffer)) {
         //sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
-        catArr(url, client->url.array+1, client->url.used-1);
+        catArr(url, client->url.array, client->url.used);
         handleResponse(client, url, client->method.array);
     }
-
+    // TODO getdatestuff
+    getFormatedTime(timeBuffer);
+    if(client->logFile.used != 0) {
+        fd = fopen(client->logFile.array, "a");
+        fprintf(fd, "%s - - [%s] \"%s %s %s\" %s %d\n", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, "200", client->bytesWritten);
+        fclose(fd);
+    }else {
+        syslog(LOG_INFO, "%s - - [%s] \"%s %s %s\" %s %d", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, "200", client->bytesWritten);
+    }
+    printf("Nr of bytes written: %d\n", client->bytesWritten);
     freeArr(&client->method);
     freeArr(&client->url);
     freeArr(&client->protocol);
     freeArr(&client->address);
+    freeArr(&client->statusCode);
+    freeArr(&client->logFile);
     freeArr(&buffer);
     freeArr(url);
 }
@@ -208,12 +232,9 @@ void handleResponse(ClientInfo* client, CharArr* url, char* method) {
     int rval, fd, fileSize;
     char* ext;
     struct stat file_stat;
-    //Removes first slash of requested url
-    //memmove(url, url+1, strlen(url));
     //If url is now empty change url to index.html
     if(!strcmp(&url->array[url->used-1], "/")) {
         catArr(url, "index.html", strlen("index.html"));
-        url->array[url->used] = '\0'; //FIXME
     }
     printf("    Client requested: %s\n", url->array);
     
@@ -235,13 +256,13 @@ void handleResponse(ClientInfo* client, CharArr* url, char* method) {
         if(DEBUG) {printf("    Method: %s\n", method);}
         if(!strcmp(method, "GET")) {
             rval = sendOkHeaders(client->socket, ext);
-            rval = sendfile (client->socket, fd, NULL, fileSize);
+            rval += sendfile (client->socket, fd, NULL, fileSize);
             printf("    Delivered file: %s\n", url->array);
         } else if (!strcmp(method, "HEAD")){
             rval = sendOkHeaders(client->socket, ext);
         } else {
             printf("Unsupported method: %s\n", method);
-            sendBadRequest(client->socket);
+            rval = sendBadRequest(client->socket);
         }
     } else {
         if(errno == 17) {
@@ -259,11 +280,18 @@ void handleResponse(ClientInfo* client, CharArr* url, char* method) {
             printf("File %s not found\n", url->array);
         }
     }
+    if(rval > 0) {
+        client->bytesWritten += rval;
+    } else {
+        rval = sendInternalError(client->socket);
+        client->bytesWritten += rval;
+    }
 }
 
 int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     char bc;
     int counter = 0;
+    int bytesWritten;
 
     //parse http method (GET, HEAD, etc)
     bc = buffer->array[counter++];
@@ -273,7 +301,7 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     }
 
     //Parse requested url
-    bc = buffer->array[counter];
+    bc = buffer->array[counter++];
     while(bc != ' ' && client->url.used != 2000 && counter < buffer->used) {
         addArr(&client->url, bc);
         bc = buffer->array[counter++];
@@ -283,15 +311,27 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
             bc = buffer->array[counter++];
         }
     }
-    bc = buffer->array[counter];
-    while(bc != '\n' && counter < buffer->used) {
+    bc = buffer->array[counter++];
+    while(bc != '\r' && counter < buffer->used) {
         addArr(&client->protocol, bc);
         bc = buffer->array[counter++];
     }
-    if(client->url.used == 2000 || counter >= buffer->used) {
-        sendBadRequest(client->socket);
+
+    if(strcasecmp(client->method.array, "GET") && strcasecmp(client->method.array, "HEAD")) {
+        bytesWritten = sendBadMethod(client->socket);
+        if(bytesWritten > 0) {
+            client->bytesWritten += bytesWritten;
+        }
         return 0;
-        //log
+    }
+
+
+    if(client->url.used == 2000 || counter >= buffer->used) {
+        bytesWritten = sendBadRequest(client->socket);
+        if(bytesWritten > 0) {
+            client->bytesWritten += bytesWritten;
+        }
+        return 0;
     }
     return 1;
 }
@@ -310,7 +350,7 @@ int sendOkHeaders(int clientSock, char* ext) {
     char* jsExt = "js";
     static char* ok_html_response =
         "HTTP/1.0 200 OK\n"
-        "Content-type: text/html\n"
+        "content-type: text/html; charset=UTF-8\n"
         "\n";
     static char* ok_jpg_response =
         "HTTP/1.0 200 OK\n"
@@ -364,7 +404,12 @@ int sendNotFound(int clientSock) {
         "HTTP/1.0 404 Not Found\n"
         "Content-type: text/html\n"
         "\n"
+        "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n"
         "<html>\n"
+        " <head>\n"
+        "  <meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\">\n"
+        "  <title>404 Not Found</title>\n"
+        " </head>\n"
         " <body>\n"
         "  <h1>404 Not Found</h1>\n"
         "  <p>The requested URL was not found on this server.</p>\n"
@@ -381,7 +426,12 @@ int sendBadRequest(int clientSock) {
         "HTTP/1.0 400 Bad Request\n"
         "Content-type: text/html\n"
         "\n"
+        "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n"
         "<html>\n"
+        " <head>\n"
+        "  <meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\">\n"
+        "  <title>400 Bad Request</title>\n"
+        " </head>\n"
         " <body>\n"
         "  <h1>400 Bad Request</h1>\n"
         "  <p>This server did not understand your request.</p>\n"
@@ -398,10 +448,15 @@ int sendBadMethod(int clientSock) {
         "HTTP/1.0 501 Method Not Implemented\n"
         "Content-type: text/html\n"
         "\n"
+        "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n"
         "<html>\n"
+        " <head>\n"
+        "  <meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\">\n"
+        "  <title>501 Method Not Implemented</title>\n"
+        " </head>\n"
         " <body>\n"
         "  <h1>501 Method Not Implemented</h1>\n"
-        "  <p>The method %s is not implemented by this server.</p>\n"
+        "  <p>The requested method is not implemented by this server.</p>\n"
         " </body>\n"
         "</html>\n";
     return write(clientSock, bad_method_response, strlen(bad_method_response));
@@ -415,7 +470,12 @@ int sendInternalError(int clientSock) {
         "HTTP/1.0 500 Internal server error\n"
         "Content-type: text/html\n"
         "\n"
+        "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n"
         "<html>\n"
+        " <head>\n"
+        "  <meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\">\n"
+        "  <title>500 Internal Server Error</title>\n"
+        " </head>\n"
         " <body>\n"
         "  <h1>500 Internal Server Error</h1>\n"
         "  <p>Something went wrong.</p>\n"
@@ -432,7 +492,12 @@ int sendForbidden(int clientSock) {
         "HTTP/1.0 403 Forbidden\n"
         "Content-type: text/html\n"
         "\n"
+        "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n"
         "<html>\n"
+        " <head>\n"
+        "  <meta http-equiv=\"Content-Type\" content=\"text/html;charset=utf-8\">\n"
+        "  <title>403 Forbidden</title>\n"
+        " </head>\n"
         " <body>\n"
         "  <h1>403 Forbidden</h1>\n"
         "  <p>Permission denied.</p>\n"
@@ -464,11 +529,12 @@ void initArr(CharArr* arr, size_t startSize) {
     Add item to array
 */
 void addArr(CharArr* arr, char item) {
-    if (arr->used == arr->size) {
+    if (arr->used-1 == arr->size) {
         arr->size *= 2;
         arr->array = (char *)realloc(arr->array, arr->size * sizeof(char));
     }
     arr->array[arr->used++] = item;
+    arr->array[arr->used] = '\0';
 }
 
 void catArr(CharArr* arr, char* items, int arrLen) {
@@ -534,5 +600,16 @@ int loadDefaultVariables(char* configFile, CharArr* defaultPath) {
         rval++;
         portBuffer = strtol(rval, (char **)NULL, 10);
     }
+    freeArr(&fileBuffer);
     return portBuffer;
+}
+
+void getFormatedTime(char* buffer) {
+    time_t rawtime;
+    struct tm * timeinfo;
+
+    time (&rawtime);
+    timeinfo = localtime (&rawtime);
+
+    strftime (buffer,80,"%d/%b/%Y:%H:%M:%S %z",timeinfo);
 }
