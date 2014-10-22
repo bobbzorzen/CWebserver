@@ -55,14 +55,14 @@ void resetArr(CharArr* arr);
 void error(const char *msg);
 
 void handleRequest(ClientInfo* client, CharArr* url);
-void handleResponse(ClientInfo* client, CharArr* url, char* method);
+void handleResponse(ClientInfo* client, CharArr* url, CharArr* method);
 
-int sendOkHeaders(int clientSock, char* ext);
-int sendNotFound(int clientSock);
-int sendBadRequest(int clientSock);
-int sendBadMethod(int clientSock);
-int sendInternalError(int clientSock);
-int sendForbidden(int clientSock);
+int sendOkHeaders(ClientInfo* client, char* ext);
+int sendNotFound(ClientInfo* client);
+int sendBadRequest(ClientInfo* client);
+int sendBadMethod(ClientInfo* client);
+int sendInternalError(ClientInfo* client);
+int sendForbidden(ClientInfo* client);
 
 int loadDefaultVariables(char* configFile, CharArr* defaultPath);
 int getHeaderInfo(ClientInfo* client, CharArr* buffer);
@@ -148,7 +148,6 @@ int main(int argc, char *argv[])
         /* Get the remote address of the connection. */
         addressLength = sizeof(serverAddr);
         rval = getpeername(client.socket, (struct sockaddr *)&serverAddr, &addressLength);
-        printf("connection accepted from %s\n", inet_ntoa(serverAddr.sin_addr));
         resetArr(&client.address);
         catArr(&client.address, inet_ntoa(serverAddr.sin_addr), strlen(inet_ntoa(serverAddr.sin_addr)));
         /* Fork a child process to handle the connection.  */
@@ -207,18 +206,18 @@ void handleRequest(ClientInfo* client, CharArr* url) {
     if(getHeaderInfo(client, &buffer)) {
         //sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
         catArr(url, client->url.array, client->url.used);
-        handleResponse(client, url, client->method.array);
+        handleResponse(client, url, &client->method);
     }
     // TODO getdatestuff
     getFormatedTime(timeBuffer);
     if(client->logFile.used != 0) {
         fd = fopen(client->logFile.array, "a");
-        fprintf(fd, "%s - - [%s] \"%s %s %s\" %s %d\n", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, "200", client->bytesWritten);
+        fprintf(fd, "%s - - [%s] \"%s %s %s\" %s %d\n", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, client->statusCode.array, client->bytesWritten);
         fclose(fd);
     }else {
-        syslog(LOG_INFO, "%s - - [%s] \"%s %s %s\" %s %d", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, "200", client->bytesWritten);
+        syslog(LOG_INFO, "%s - - [%s] \"%s %s %s\" %s %d", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, client->statusCode.array, client->bytesWritten);
     }
-    printf("Nr of bytes written: %d\n", client->bytesWritten);
+    printf("%s - - [%s] \"%s %s %s\" %s %d\n", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, client->statusCode.array, client->bytesWritten);
     freeArr(&client->method);
     freeArr(&client->url);
     freeArr(&client->protocol);
@@ -228,7 +227,7 @@ void handleRequest(ClientInfo* client, CharArr* url) {
     freeArr(&buffer);
     freeArr(url);
 }
-void handleResponse(ClientInfo* client, CharArr* url, char* method) {
+void handleResponse(ClientInfo* client, CharArr* url, CharArr* method) {
     int rval, fd, fileSize;
     char* ext;
     struct stat file_stat;
@@ -236,8 +235,6 @@ void handleResponse(ClientInfo* client, CharArr* url, char* method) {
     if(!strcmp(&url->array[url->used-1], "/")) {
         catArr(url, "index.html", strlen("index.html"));
     }
-    printf("    Client requested: %s\n", url->array);
-    
     /* Try to deliver the requested file */
     fd = open(url->array, O_RDONLY);
     if(fd != -1) {
@@ -253,37 +250,31 @@ void handleResponse(ClientInfo* client, CharArr* url, char* method) {
         /* Get file stats */
         fstat(fd, &file_stat);
         fileSize = file_stat.st_size;
-        if(DEBUG) {printf("    Method: %s\n", method);}
-        if(!strcmp(method, "GET")) {
-            rval = sendOkHeaders(client->socket, ext);
+        if(DEBUG) {printf("    Method: %s\n", method->array);}
+        if(!strcmp(method->array, "GET")) {
+            rval = sendOkHeaders(client, ext);
             rval += sendfile (client->socket, fd, NULL, fileSize);
-            printf("    Delivered file: %s\n", url->array);
-        } else if (!strcmp(method, "HEAD")){
-            rval = sendOkHeaders(client->socket, ext);
+        } else if (!strcmp(method->array, "HEAD")){
+            rval = sendOkHeaders(client, ext);
         } else {
-            printf("Unsupported method: %s\n", method);
-            rval = sendBadRequest(client->socket);
+            rval = sendBadRequest(client);
         }
     } else {
         if(errno == 17) {
             //Read error, file exists
-            //send 500 internal server error.
-            printf("Read error: File exists, server is broken\n");
-            rval = sendInternalError(client->socket);
+            rval = sendInternalError(client);
         } else if(errno == 21) {
             //read error, file is a directory
-            //enable fancy url parser that delivers index.html or 404?
-            printf("Read error, file is a directory, FIXME\n");
-            rval = sendBadRequest(client->socket);
+            //printf("Read error, file is a directory, FIXME\n");
+            rval = sendBadRequest(client);
         } else {
-            rval = sendNotFound(client->socket);
-            printf("File %s not found\n", url->array);
+            rval = sendNotFound(client);
         }
     }
     if(rval > 0) {
         client->bytesWritten += rval;
     } else {
-        rval = sendInternalError(client->socket);
+        rval = sendInternalError(client);
         client->bytesWritten += rval;
     }
 }
@@ -318,7 +309,7 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     }
 
     if(strcasecmp(client->method.array, "GET") && strcasecmp(client->method.array, "HEAD")) {
-        bytesWritten = sendBadMethod(client->socket);
+        bytesWritten = sendBadMethod(client);
         if(bytesWritten > 0) {
             client->bytesWritten += bytesWritten;
         }
@@ -327,7 +318,7 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
 
 
     if(client->url.used == 2000 || counter >= buffer->used) {
-        bytesWritten = sendBadRequest(client->socket);
+        bytesWritten = sendBadRequest(client);
         if(bytesWritten > 0) {
             client->bytesWritten += bytesWritten;
         }
@@ -336,7 +327,8 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     return 1;
 }
 
-int sendOkHeaders(int clientSock, char* ext) {
+int sendOkHeaders(ClientInfo* client, char* ext) {
+    catArr(&client->statusCode, "200", strlen("200"));
     /**
         HTTP response, header for valid requests dokument body should be appended on GET requests
     */
@@ -391,11 +383,12 @@ int sendOkHeaders(int clientSock, char* ext) {
     }else{
         catArr(&response, ok_html_response, strlen(ok_html_response));
     }
-    int rval = write(clientSock, response.array, response.used);
+    int rval = write(client->socket, response.array, response.used);
     freeArr(&response);
     return rval;
 }
-int sendNotFound(int clientSock) {
+int sendNotFound(ClientInfo* client) {
+    catArr(&client->statusCode, "404", strlen("404"));
     /* 
         HTTP response, header, and body template indicating that the
         requested document was not found.  
@@ -415,9 +408,10 @@ int sendNotFound(int clientSock) {
         "  <p>The requested URL was not found on this server.</p>\n"
         " </body>\n"
         "</html>\n";
-    return write(clientSock, not_found_response, strlen(not_found_response));
+    return write(client->socket, not_found_response, strlen(not_found_response));
 }
-int sendBadRequest(int clientSock) {
+int sendBadRequest(ClientInfo* client) {
+    catArr(&client->statusCode, "400", strlen("400"));
     /* 
         HTTP response, header, and body indicating that the we didn't
         understand the request.  
@@ -437,9 +431,10 @@ int sendBadRequest(int clientSock) {
         "  <p>This server did not understand your request.</p>\n"
         " </body>\n"
         "</html>\n";
-    return write(clientSock, bad_request_response, strlen(bad_request_response));
+    return write(client->socket, bad_request_response, strlen(bad_request_response));
 }
-int sendBadMethod(int clientSock) {
+int sendBadMethod(ClientInfo* client) {
+    catArr(&client->statusCode, "501", strlen("501"));
     /* 
         HTTP response, header, and body template indicating that the
         method was not understood.  
@@ -459,9 +454,10 @@ int sendBadMethod(int clientSock) {
         "  <p>The requested method is not implemented by this server.</p>\n"
         " </body>\n"
         "</html>\n";
-    return write(clientSock, bad_method_response, strlen(bad_method_response));
+    return write(client->socket, bad_method_response, strlen(bad_method_response));
 }
-int sendInternalError(int clientSock) {
+int sendInternalError(ClientInfo* client) {
+    catArr(&client->statusCode, "500", strlen("500"));
     /* 
         HTTP response, header, and body template indicating that the
         method was not understood.  
@@ -481,9 +477,10 @@ int sendInternalError(int clientSock) {
         "  <p>Something went wrong.</p>\n"
         " </body>\n"
         "</html>\n";
-    return write(clientSock, internal_server_error_response, strlen(internal_server_error_response));
+    return write(client->socket, internal_server_error_response, strlen(internal_server_error_response));
 }
-int sendForbidden(int clientSock) {
+int sendForbidden(ClientInfo* client) {
+    catArr(&client->statusCode, "403", strlen("403"));
     /* 
         HTTP response, header, and body template indicating that the
         requested document was not found.  
@@ -503,7 +500,7 @@ int sendForbidden(int clientSock) {
         "  <p>Permission denied.</p>\n"
         " </body>\n"
         "</html>\n";
-    return write(clientSock, forbidden_response, strlen(forbidden_response));
+    return write(client->socket, forbidden_response, strlen(forbidden_response));
 }
 
 
