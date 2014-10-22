@@ -104,6 +104,11 @@ int main(int argc, char *argv[])
     } else {
         printf("Set /home/jails/webserver as root folder\n");
     }
+    /* Change the current working directory */
+    if ((chdir("/")) < 0) {
+        /* Log the failure */
+        exit(EXIT_FAILURE);
+    }
     syslog(LOG_INFO, "%s", "Successfully Jailed webserver to /home/jails/webserver");
 
     /**
@@ -147,11 +152,6 @@ int main(int argc, char *argv[])
         /* Create a new SID for the child process */
         sid = setsid();
         if (sid < 0) {
-            /* Log the failure */
-            exit(EXIT_FAILURE);
-        }
-        /* Change the current working directory */
-        if ((chdir("/")) < 0) {
             /* Log the failure */
             exit(EXIT_FAILURE);
         }
