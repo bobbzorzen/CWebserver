@@ -1,0 +1,29 @@
+body {
+}
+
+h1 {
+	text-align: center;
+}
+#wrapper {
+	width:80%;
+	margin:auto;
+}
+
+#content {
+	margin:20px;
+	min-height: 500px;
+}
+
+ 
+/**
+ * Layout for footer
+ */
+#footer {
+  margin-top: 40px;
+  border-top: 1px solid #ccc;
+  padding-top: 15px;
+}
+ 
+.sitefooter {
+  color: #666;
+}
