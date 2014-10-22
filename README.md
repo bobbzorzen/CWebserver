@@ -5,9 +5,9 @@ A simple webserver in C written as a lab assignment in a UNIX programming course
 
 
 ##How to use?
- Compile using gcc
- run with sudo
- jail will be in /home/jail/webserver so you should put your www folder in there. 
+ * Compile using gcc
+ * Run with sudo
+ * Jail will be in /home/jail/webserver so you should put your www folder in there. 
 
 ##The commandFlags?
  * -p &lt; port &gt; - The port you wish the server to run on, if the default port(defined in .lab3-conf) is not wanted.
