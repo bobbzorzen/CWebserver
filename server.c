@@ -95,6 +95,15 @@ int main(int argc, char *argv[])
     initArr(&client.logFile, 64);
     initArr(&defaultPath, 32);
     portNr = loadDefaultVariables(configFile, &defaultPath);
+
+    if (chroot("/tmp/chroot") != 0) {
+        perror("chroot /tmp/chroot");
+        return 1;
+    } else {
+        printf("Set /tmp/chroot as root folder\n");
+    }
+
+
     /**
         Init variables
     */
