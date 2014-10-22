@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,19 +104,55 @@ int main(int argc, char *argv[])
         // Set port if defined
         if(!strcmp(argv[i], "-p")) {
             portNr = strtol(argv[++i], (char **)NULL, 10);
-            printf("Use port: %d\n", portNr);
+            printf("Using port: %d\n", portNr);
         }
         //Enable daemon mode if defined
         if(!strcmp(argv[i], "-d")) {
             isDaemon = 1;
-            printf("Enable Daemon mode\n", portNr);
+            printf("Daemonmode activated\n", portNr);
         }
         //Enable log file if defined
         if(!strcmp(argv[i], "-l")) {
             catArr(&client.logFile, argv[++i], strlen(argv[i]));
-            printf("Sets logFile to: %s\n", client.logFile.array);
+            printf("LogFile set to: %s\n", client.logFile.array);
         }
     }
+    if(isDaemon) {
+        /* Our process ID and Session ID */
+        pid_t pid, sid;
+        /* Fork off the parent process */
+        pid = fork();
+        if (pid < 0) {
+            exit(EXIT_FAILURE);
+        }
+        /* If we got a good PID, then
+           we can exit the parent process. */
+        if (pid > 0) {
+            printf("Process id: %d\n", pid);
+            exit(EXIT_SUCCESS);
+        }
+        /* Change the file mode mask */
+        umask(0);
+        /* Create a new SID for the child process */
+        sid = setsid();
+        if (sid < 0) {
+            /* Log the failure */
+            exit(EXIT_FAILURE);
+        }
+        /* Change the current working directory */
+        if ((chdir("/")) < 0) {
+            /* Log the failure */
+            exit(EXIT_FAILURE);
+        }
+        
+        /* Close out the standard file descriptors */
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+    }
+
+
+
     printf("PORT: %d\n", portNr);
     serverSock = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSock < 0) {error("ERROR opening socket");}
@@ -150,6 +187,9 @@ int main(int argc, char *argv[])
         rval = getpeername(client.socket, (struct sockaddr *)&serverAddr, &addressLength);
         resetArr(&client.address);
         catArr(&client.address, inet_ntoa(serverAddr.sin_addr), strlen(inet_ntoa(serverAddr.sin_addr)));
+
+        //Ignore the dying children
+        signal(SIGCHLD, SIG_IGN);
         /* Fork a child process to handle the connection.  */
         childPid = fork();
         if (childPid == 0) {
@@ -217,7 +257,7 @@ void handleRequest(ClientInfo* client, CharArr* url) {
     }else {
         syslog(LOG_INFO, "%s - - [%s] \"%s %s %s\" %s %d", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, client->statusCode.array, client->bytesWritten);
     }
-    printf("%s - - [%s] \"%s %s %s\" %s %d\n", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, client->statusCode.array, client->bytesWritten);
+    //printf("%s - - [%s] \"%s %s %s\" %s %d\n", client->address.array, timeBuffer, client->method.array, client->url.array, client->protocol.array, client->statusCode.array, client->bytesWritten);
     freeArr(&client->method);
     freeArr(&client->url);
     freeArr(&client->protocol);
@@ -306,6 +346,14 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     while(bc != '\r' && counter < buffer->used) {
         addArr(&client->protocol, bc);
         bc = buffer->array[counter++];
+    }
+
+    if(strstr(client->url.array, "..") != NULL) {
+        bytesWritten = sendForbidden(client);
+        if(bytesWritten > 0) {
+            client->bytesWritten += bytesWritten;
+        }
+        return 0;
     }
 
     if(strcasecmp(client->method.array, "GET") && strcasecmp(client->method.array, "HEAD")) {
