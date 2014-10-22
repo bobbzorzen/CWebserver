@@ -56,12 +56,12 @@ void resetArr(CharArr* arr);
 void error(const char *msg);
 
 void handleRequest(ClientInfo* client, CharArr* url);
-void handleResponse(ClientInfo* client, CharArr* url, CharArr* method);
+void handleResponse(ClientInfo* client, CharArr* url);
 
 int sendOkHeaders(ClientInfo* client, char* ext);
 int sendNotFound(ClientInfo* client);
 int sendBadRequest(ClientInfo* client);
-int sendBadMethod(ClientInfo* client);
+int sendNotImplemented(ClientInfo* client);
 int sendInternalError(ClientInfo* client);
 int sendForbidden(ClientInfo* client);
 
@@ -120,7 +120,6 @@ int main(int argc, char *argv[])
         // Set port if defined
         if(!strcmp(argv[i], "-p")) {
             portNr = strtol(argv[++i], (char **)NULL, 10);
-            printf("Using port: %d\n", portNr);
         }
         //Enable daemon mode if defined
         if(!strcmp(argv[i], "-d")) {
@@ -134,6 +133,7 @@ int main(int argc, char *argv[])
         }
     }
     if(isDaemon) {
+        printf("Listening on port: %d\n", portNr);
         /* Our process ID and Session ID */
         pid_t pid, sid;
         /* Fork off the parent process */
@@ -164,7 +164,6 @@ int main(int argc, char *argv[])
 
 
 
-    printf("PORT: %d\n", portNr);
     serverSock = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSock < 0) {error("ERROR opening socket");}
     // Clear the server address
@@ -187,7 +186,7 @@ int main(int argc, char *argv[])
     */
     // Listen to the socket
     listen(serverSock,20);
-    printf("Server is now listening for clients\n\n");
+    printf("Listening on port: %d\n\n", portNr);
     while(1) {
         /* accepts the client */
         client.socket = accept(serverSock, (struct sockaddr *) &clientAddr, &clilen);
@@ -201,6 +200,7 @@ int main(int argc, char *argv[])
 
         //Ignore the dying children
         signal(SIGCHLD, SIG_IGN);
+
         /* Fork a child process to handle the connection.  */
         childPid = fork();
         if (childPid == 0) {
@@ -248,18 +248,17 @@ void handleRequest(ClientInfo* client, CharArr* url) {
     initArr(&buffer, 128);
 
     /* Read the client request to buffer */
-    while (strstr (buffer.array, "\r\n\r\n") == NULL && buffer.array[0] != '\n' ) {
+    while (strstr (buffer.array, "\r\n\r\n") == NULL && buffer.array[0] != '\n' && buffer.used <= 3000) {
         read(client->socket, &bc, 1);
         addArr(&buffer, bc);
     }
     if(DEBUG) {printf("CLIENT REQUEST: %s\n", buffer.array);}
     //extracts the method, url and protocoll from the buffer
     if(getHeaderInfo(client, &buffer)) {
-        //sscanf (buffer.array, "%s %s %s", method, raw_url, protocol);
         catArr(url, client->url.array, client->url.used);
-        handleResponse(client, url, &client->method);
+        handleResponse(client, url);
     }
-    // TODO getdatestuff
+
     getFormatedTime(timeBuffer);
     if(client->logFile.used != 0) {
         fd = fopen(client->logFile.array, "a");
@@ -278,7 +277,7 @@ void handleRequest(ClientInfo* client, CharArr* url) {
     freeArr(&buffer);
     freeArr(url);
 }
-void handleResponse(ClientInfo* client, CharArr* url, CharArr* method) {
+void handleResponse(ClientInfo* client, CharArr* url) {
     int rval, fd, fileSize;
     char* ext;
     struct stat file_stat;
@@ -292,7 +291,7 @@ void handleResponse(ClientInfo* client, CharArr* url, CharArr* method) {
         ext = strrchr(url->array, '.');
         if (!ext) {
             addArr(url, '/');
-            handleResponse(client, url, method);
+            handleResponse(client, url);
             return;
             //File has no extension... 400?
         } else {
@@ -301,23 +300,19 @@ void handleResponse(ClientInfo* client, CharArr* url, CharArr* method) {
         /* Get file stats */
         fstat(fd, &file_stat);
         fileSize = file_stat.st_size;
-        if(DEBUG) {printf("    Method: %s\n", method->array);}
-        if(!strcmp(method->array, "GET")) {
+        if(DEBUG) {printf("    Method: %s\n", client->method.array);}
+        if(!strcmp(client->method.array, "GET")) {
             rval = sendOkHeaders(client, ext);
             rval += sendfile (client->socket, fd, NULL, fileSize);
-        } else if (!strcmp(method->array, "HEAD")){
+        } else if (!strcmp(client->method.array, "HEAD")){
             rval = sendOkHeaders(client, ext);
         } else {
-            rval = sendBadRequest(client);
+            rval = sendNotImplemented(client);
         }
     } else {
-        if(errno == 17) {
-            //Read error, file exists
+        if(errno == 17 || errno == 21 ) {
+            //Read error, file exists or is directory? :S
             rval = sendInternalError(client);
-        } else if(errno == 21) {
-            //read error, file is a directory
-            //printf("Read error, file is a directory, FIXME\n");
-            rval = sendBadRequest(client);
         } else {
             rval = sendNotFound(client);
         }
@@ -349,10 +344,11 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
         bc = buffer->array[counter++];
     }
     if(client->url.used == 2000 && counter < buffer->used) {
-        while(bc != ' ') {
+        while(bc != ' ' && counter < buffer->used) {
             bc = buffer->array[counter++];
         }
     }
+
     bc = buffer->array[counter++];
     while(bc != '\r' && counter < buffer->used) {
         addArr(&client->protocol, bc);
@@ -368,13 +364,12 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     }
 
     if(strcasecmp(client->method.array, "GET") && strcasecmp(client->method.array, "HEAD")) {
-        bytesWritten = sendBadMethod(client);
+        bytesWritten = sendNotImplemented(client);
         if(bytesWritten > 0) {
             client->bytesWritten += bytesWritten;
         }
         return 0;
     }
-
 
     if(client->url.used == 2000 || counter >= buffer->used) {
         bytesWritten = sendBadRequest(client);
@@ -492,7 +487,7 @@ int sendBadRequest(ClientInfo* client) {
         "</html>\n";
     return write(client->socket, bad_request_response, strlen(bad_request_response));
 }
-int sendBadMethod(ClientInfo* client) {
+int sendNotImplemented(ClientInfo* client) {
     catArr(&client->statusCode, "501", strlen("501"));
     /* 
         HTTP response, header, and body template indicating that the
