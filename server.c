@@ -95,14 +95,16 @@ int main(int argc, char *argv[])
     initArr(&client.logFile, 64);
     initArr(&defaultPath, 32);
     portNr = loadDefaultVariables(configFile, &defaultPath);
-
-    if (chroot("/tmp/chroot") != 0) {
-        perror("chroot /tmp/chroot");
+    syslog(LOG_INFO, "%s", "Webserver has started");
+    mkdir("/home/jails", ACCESSPERMS);
+    mkdir("/home/jails/webserver", ACCESSPERMS);
+    if (chroot("/home/jails/webserver") != 0) {
+        perror("/home/jails/webserver");
         return 1;
     } else {
-        printf("Set /tmp/chroot as root folder\n");
+        printf("Set /home/jails/webserver as root folder\n");
     }
-
+    syslog(LOG_INFO, "%s", "Successfully Jailed webserver to /home/jails/webserver");
 
     /**
         Init variables
