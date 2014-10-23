@@ -36,6 +36,7 @@ typedef struct {
 typedef struct {
     int socket;
     int bytesWritten;
+    int simple;
     CharArr method;
     CharArr url;
     CharArr protocol;
@@ -58,7 +59,7 @@ void error(const char *msg);
 void handleRequest(ClientInfo* client, CharArr* url);
 void handleResponse(ClientInfo* client, CharArr* url);
 
-int sendOkHeaders(ClientInfo* client, char* ext);
+int sendOkHeaders(ClientInfo* client, char* ext, int fileSize);
 int sendNotFound(ClientInfo* client);
 int sendBadRequest(ClientInfo* client);
 int sendNotImplemented(ClientInfo* client);
@@ -87,6 +88,7 @@ int main(int argc, char *argv[])
     ClientInfo client;
     client.socket = 0;
     client.bytesWritten = 0;
+    client.simple = 0;
     initArr(&client.method, 16);
     initArr(&client.url, 32);
     initArr(&client.protocol, 16);
@@ -128,7 +130,8 @@ int main(int argc, char *argv[])
         }
         //Enable log file if defined
         if(!strcmp(argv[i], "-l")) {
-            catArr(&client.logFile, argv[++i], strlen(argv[i]));
+            i++;
+            catArr(&client.logFile, argv[i], strlen(argv[i]));
             printf("LogFile set to: %s\n", client.logFile.array);
         }
     }
@@ -302,10 +305,14 @@ void handleResponse(ClientInfo* client, CharArr* url) {
         fileSize = file_stat.st_size;
         if(DEBUG) {printf("    Method: %s\n", client->method.array);}
         if(!strcmp(client->method.array, "GET")) {
-            rval = sendOkHeaders(client, ext);
+            if(!client->simple) {
+                rval = sendOkHeaders(client, ext, fileSize);
+            }
             rval += sendfile (client->socket, fd, NULL, fileSize);
         } else if (!strcmp(client->method.array, "HEAD")){
-            rval = sendOkHeaders(client, ext);
+            if(!client->simple) {
+                rval = sendOkHeaders(client, ext, fileSize);
+            }
         } else {
             rval = sendNotImplemented(client);
         }
@@ -339,9 +346,13 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
 
     //Parse requested url
     bc = buffer->array[counter++];
-    while(bc != ' ' && client->url.used != 2000 && counter < buffer->used) {
+    while(bc != ' ' && bc != '\r' && client->url.used != 2000 && counter < buffer->used) {
         addArr(&client->url, bc);
         bc = buffer->array[counter++];
+    }
+    if(bc == '\r') {
+        client->simple = 1;
+        return 1;
     }
     if(client->url.used == 2000 && counter < buffer->used) {
         while(bc != ' ' && counter < buffer->used) {
@@ -381,7 +392,7 @@ int getHeaderInfo(ClientInfo* client, CharArr* buffer) {
     return 1;
 }
 
-int sendOkHeaders(ClientInfo* client, char* ext) {
+int sendOkHeaders(ClientInfo* client, char* ext, int fileSize) {
     catArr(&client->statusCode, "200", strlen("200"));
     /**
         HTTP response, header for valid requests dokument body should be appended on GET requests
@@ -394,49 +405,61 @@ int sendOkHeaders(ClientInfo* client, char* ext) {
     char* icoExt = "ico";
     char* cssExt = "css";
     char* jsExt = "js";
-    static char* ok_html_response =
-        "HTTP/1.0 200 OK\n"
-        "content-type: text/html; charset=UTF-8\n"
-        "\n";
-    static char* ok_jpg_response =
+    char responseString[200];
+    const char* ok_html_response ="HTTP/1.0 200 OK\ncontent-type: text/html; charset=UTF-8\ncontent-length: %d\n\n";
+    const char* ok_jpg_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: image/jpeg\n"
+        "content-length: %d\n"
         "\n";
-    static char* ok_png_response =
+    const char* ok_png_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: image/png\n"
+        "content-length: %d\n"
         "\n";
-    static char* ok_gif_response =
+    const char* ok_gif_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: image/gif\n"
+        "content-length: %d\n"
         "\n";
-    static char* ok_ico_response =
+    const char* ok_ico_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: image/x-icon\n"
+        "content-length: %d\n"
         "\n";
-    static char* ok_css_response =
+    const char* ok_css_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: text/css\n"
+        "content-length: %d\n"
         "\n";
-    static char* ok_js_response =
+    const char* ok_js_response =
         "HTTP/1.0 200 OK\n"
         "Content-type: text/javascript\n"
+        "content-length: %d\n"
         "\n";
     if(!strcmp(jpgExt, ext)) {
-        catArr(&response, ok_jpg_response, strlen(ok_jpg_response));
+        sprintf(responseString, ok_jpg_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }else if(!strcmp(pngExt, ext)){
-        catArr(&response, ok_png_response, strlen(ok_png_response));
+        sprintf(responseString, ok_png_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }else if(!strcmp(gifExt, ext)){
-        catArr(&response, ok_gif_response, strlen(ok_gif_response));
+        sprintf(responseString, ok_gif_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }else if(!strcmp(icoExt, ext)){
-        catArr(&response, ok_ico_response, strlen(ok_ico_response));
+        sprintf(responseString, ok_ico_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }else if(!strcmp(cssExt, ext)){
-        catArr(&response, ok_css_response, strlen(ok_css_response));
+        sprintf(responseString, ok_css_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }else if(!strcmp(jsExt, ext)){
-        catArr(&response, ok_js_response, strlen(ok_js_response));
+        sprintf(responseString, ok_js_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }else{
-        catArr(&response, ok_html_response, strlen(ok_html_response));
+        sprintf(responseString, ok_html_response, fileSize);
+        catArr(&response, responseString, strlen(responseString));
     }
+
     int rval = write(client->socket, response.array, response.used);
     freeArr(&response);
     return rval;
